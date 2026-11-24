@@ -1,0 +1,32 @@
+# 基线：PatchTST（通道独立 + patch + 实例标准化）
+# 结构参数沿用 PatchTST 论文/官方实现的常用设置：patch 16、stride 8、3 层、lr 1e-4
+experiment: patchtst_ETTh1_h96
+seed: 2021
+device: auto
+runs_dir: runs
+
+data:
+  name: ETTh1
+  root: data/raw
+  file: ETT-small/ETTh1.csv
+  target: OT
+  features: M
+  seq_len: 96
+  pred_len: 96
+
+model:
+  name: patchtst
+  d_model: 128
+  d_ff: 256
+  n_heads: 16
+  e_layers: 3
+  dropout: 0.1
+  patch_len: 16
+  patch_stride: 8
+
+train:
+  batch_size: 32
+  learning_rate: 0.0001
+  epochs: 10
+  patience: 0
+  num_workers: 0

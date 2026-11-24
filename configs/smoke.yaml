@@ -1,0 +1,34 @@
+experiment: smoke_ETTh1_h96
+seed: 2021
+device: auto
+runs_dir: runs
+
+data:
+  name: ETTh1
+  root: data/raw
+  file: ETT-small/ETTh1.csv
+  target: OT
+  features: M
+  seq_len: 96
+  pred_len: 96
+
+model:
+  name: itransformer
+  d_model: 64
+  d_ff: 128
+  n_heads: 4
+  e_layers: 1
+  dropout: 0.1
+  variate_module: attention
+  temporal_module: ffn
+  use_layernorm: true
+  use_pos_embed: false
+
+# 1 epoch + small model: only checks that the pipeline runs.
+# These results must never be reported as experimental evidence.
+train:
+  batch_size: 8
+  learning_rate: 0.001
+  epochs: 1
+  patience: 0
+  num_workers: 0

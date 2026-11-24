@@ -1,0 +1,33 @@
+# 消融 D：去掉时间维 FFN（论文表 3 的 w/o FFN）
+experiment: ablation_no_ffn_ETTh1_h96
+seed: 2021
+device: auto
+runs_dir: runs
+
+data:
+  name: ETTh1
+  root: data/raw
+  file: ETT-small/ETTh1.csv
+  target: OT
+  features: M
+  seq_len: 96
+  pred_len: 96
+
+model:
+  name: itransformer
+  d_model: 512
+  d_ff: 512
+  n_heads: 8
+  e_layers: 2
+  dropout: 0.1
+  variate_module: attention
+  temporal_module: none
+  use_layernorm: true
+  use_pos_embed: false
+
+train:
+  batch_size: 16
+  learning_rate: 0.001
+  epochs: 10
+  patience: 0
+  num_workers: 0

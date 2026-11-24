@@ -1,0 +1,25 @@
+# 基线：DLinear（序列分解 + 线性映射），其余设置与主实验保持一致
+experiment: dlinear_ETTh1_h96
+seed: 2021
+device: auto
+runs_dir: runs
+
+data:
+  name: ETTh1
+  root: data/raw
+  file: ETT-small/ETTh1.csv
+  target: OT
+  features: M
+  seq_len: 96
+  pred_len: 96
+
+model:
+  name: dlinear
+  kernel_size: 25
+
+train:
+  batch_size: 32
+  learning_rate: 0.001
+  epochs: 10
+  patience: 0
+  num_workers: 0
