@@ -1,8 +1,8 @@
-# 消融 A：变量维混合由注意力换成 FFN（论文表 3 的 FFN-FNN 一半）
+﻿# 消融：Replace FFN→FFN（variate=ffn, temporal=ffn；论文表 3）
 experiment: ablation_variate_ffn_ETTh1_h96
 seed: 2021
 device: auto
-runs_dir: runs
+runs_dir: results/raw
 
 data:
   name: ETTh1
@@ -26,8 +26,9 @@ model:
   use_pos_embed: false
 
 train:
-  batch_size: 16
+  batch_size: 32
   learning_rate: 0.001
   epochs: 10
   patience: 0
   num_workers: 0
+

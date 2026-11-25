@@ -1,0 +1,36 @@
+cff-version: 1.2.0
+message: "If you use this course reproduction, please cite the original iTransformer paper and this repository."
+title: "itransformer-repro: Course Reproduction of iTransformer"
+type: software
+license: MIT
+repository-code: "https://github.com/<your-org>/itransformer-repro"
+authors:
+  - name: "iTransformer Reproducibility Course Project"
+abstract: "A reproducible PyTorch reimplementation of iTransformer for long-term multivariate time-series forecasting, with DLinear/PatchTST/Vanilla Transformer baselines, six ablation designs, and a results pipeline."
+keywords:
+  - time series forecasting
+  - iTransformer
+  - reproducibility
+  - PyTorch
+preferred-citation:
+  type: conference-paper
+  title: "iTransformer: Inverted Transformers Are Effective for Time Series Forecasting"
+  authors:
+    - family-names: "Liu"
+      given-names: "Yong"
+    - family-names: "Hu"
+      given-names: "Tengge"
+    - family-names: "Zhang"
+      given-names: "Haoran"
+    - family-names: "Wu"
+      given-names: "Haixu"
+    - family-names: "Wang"
+      given-names: "Shiyu"
+    - family-names: "Ma"
+      given-names: "Lintao"
+    - family-names: "Long"
+      given-names: "Mingsheng"
+  conference:
+    name: "International Conference on Learning Representations (ICLR)"
+  year: 2024
+  url: "https://arxiv.org/abs/2310.06625"

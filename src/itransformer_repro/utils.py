@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import random
 import subprocess
 import sys
@@ -32,6 +33,9 @@ def seed_everything(seed: int) -> None:
     if seed < 0:
         raise ValueError(f"seed 必须为非负整数，当前为 {seed}")
     os.environ["PYTHONHASHSEED"] = str(seed)
+    if torch.cuda.is_available():
+        # CUDA >= 10.2 要求固定 workspace 配置，确定性 cuBLAS 才可复现。
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -57,15 +61,21 @@ def get_logger(name: str, log_file: Path | None = None) -> logging.Logger:
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    if logger.handlers:
-        return logger
 
     formatter = logging.Formatter(LOG_FORMAT)
-    stream_handler = logging.StreamHandler()
-    stream_handler.setFormatter(formatter)
-    logger.addHandler(stream_handler)
+    has_stream = any(
+        isinstance(handler, logging.StreamHandler)
+        and not isinstance(handler, logging.FileHandler)
+        for handler in logger.handlers
+    )
+    if not has_stream:
+        stream_handler = logging.StreamHandler()
+        stream_handler.setFormatter(formatter)
+        logger.addHandler(stream_handler)
 
     if log_file is not None:
+        # 同一进程连续跑多次实验时，必须把文件处理器切换到本次 run 的日志，
+        # 否则后续实验的日志会全部写进第一次实验的 train.log。
         for handler in list(logger.handlers):
             if isinstance(handler, logging.FileHandler):
                 handler.close()
@@ -139,12 +149,18 @@ def resolve_device(requested: str = "auto") -> torch.device:
     return torch.device(requested)
 
 
+def project_root() -> Path:
+    """返回仓库根目录；安装到 site-packages 时退回当前工作目录。"""
+    candidate = Path(__file__).resolve().parents[2]
+    return candidate if (candidate / ".git").exists() else Path.cwd()
+
+
 def git_commit(cwd: Path | None = None) -> str:
     """返回工作区当前短提交哈希；不在 git 仓库时返回 ``"unknown"``。"""
     try:
         result = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
-            cwd=cwd,
+            cwd=cwd or project_root(),
             capture_output=True,
             text=True,
             check=True,
@@ -154,14 +170,31 @@ def git_commit(cwd: Path | None = None) -> str:
     return result.stdout.strip() or "unknown"
 
 
+def git_dirty(cwd: Path | None = None) -> bool | None:
+    """工作区是否有未提交改动；不在 git 仓库时返回 ``None``。"""
+    try:
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=cwd or project_root(),
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return bool(result.stdout.strip())
+
+
 def environment_info() -> dict[str, Any]:
     """收集运行时版本与硬件信息，写入实验记录以支持复现。"""
     info: dict[str, Any] = {
         "python": sys.version.split()[0],
+        "platform": platform.platform(),
         "torch": torch.__version__,
         "numpy": np.__version__,
         "cuda_available": torch.cuda.is_available(),
         "cuda_version": torch.version.cuda,
+        "cudnn_version": torch.backends.cudnn.version(),
         "gpu": "cpu",
     }
     if torch.cuda.is_available():

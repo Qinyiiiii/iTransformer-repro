@@ -1,26 +1,28 @@
-"""由汇总 CSV 生成三张结果图（主结果、模型对比、消融）。
+"""由汇总 CSV 生成主结果、模型对比、消融与回看曲线图。
 
 用途：
-    读取 ``scripts/aggregate.py`` 生成的 ``outputs/summary.csv``，在
-    ``outputs/figures/`` 下生成：
+    读取 ``scripts/aggregate.py`` 生成的 ``results/summary/summary.csv``，在
+    ``results/figures/`` 下生成：
 
     * ``mse_by_horizon.png``：每个数据集一个子图，画出各模型 MSE 随预测长度的
-      变化；
+      变化，带种子间标准差阴影；
     * ``model_comparison.png``：按数据集分组的柱状图，比较各模型跨预测长度的
       平均 MSE（有标准差时附带误差棒）；
-    * ``ablation.png``：从 summary 的 model 列中筛出消融配置画柱状图；没有消融
-      数据时跳过该图并记录日志，不算失败。
+    * ``ablation.png``：从 summary 的 experiment 列中筛出消融配置画柱状图；
+    * ``lookback_curve.png``：当 summary 中存在多个 ``seq_len`` 时，画出
+      MSE 随回看长度的变化；只有一个回看长度时跳过。
 
-    为避开发行环境的中文字体缺失，图中文字统一使用英文。所有图以 ``Agg`` 后端
-    离屏渲染，dpi=150。
+    主图默认只使用 ``seq_len=96`` 的主实验行，避免回看扫描行混入；若没有
+    ``seq_len=96``，退回该列的最小值。为避开发行环境的中文字体缺失，图中文字
+    统一使用英文。所有图以 ``Agg`` 后端离屏渲染，dpi=150。
 
 前置条件：
-    已执行 ``python -m pip install -e ".[dev]"``，且已运行
+    已执行 ``python -m pip install -r requirements.txt``，且已运行
     ``python scripts/aggregate.py`` 生成汇总 CSV。
 
 示例命令：
     python scripts/make_figures.py
-    python scripts/make_figures.py --summary outputs/summary.csv
+    python scripts/make_figures.py --summary results/summary/summary.csv
 """
 
 from __future__ import annotations
@@ -64,14 +66,20 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="make_figures.py",
-        description="由 outputs/summary.csv 生成 mse_by_horizon、"
-        "model_comparison 与 ablation 三张图。",
+        description="由 results/summary/summary.csv 生成主结果、模型对比、"
+        "消融与回看曲线图。",
     )
     parser.add_argument(
         "--summary",
         type=Path,
-        default=Path("outputs/summary.csv"),
-        help="汇总 CSV 路径，默认 outputs/summary.csv；图片写入其同级 figures/ 目录。",
+        default=Path("results/summary/summary.csv"),
+        help="汇总 CSV 路径，默认 results/summary/summary.csv。",
+    )
+    parser.add_argument(
+        "--figures-dir",
+        type=Path,
+        default=Path("results/figures"),
+        help="图片输出目录，默认 results/figures。",
     )
     return parser
 
@@ -91,15 +99,20 @@ def read_summary(path: Path) -> list[dict[str, str]]:
     """
     if not path.is_file():
         raise FileNotFoundError(f"汇总文件不存在：{path}")
-    with path.open(newline="", encoding="utf-8") as handle:
-        reader = csv.DictReader(handle)
-        fieldnames = tuple(reader.fieldnames or ())
-        missing = [name for name in REQUIRED_COLUMNS if name not in fieldnames]
-        if missing:
-            raise ValueError(
-                f"{path} 缺少列：{', '.join(missing)}；请重新运行 aggregate.py"
-            )
-        return list(reader)
+    # 允许以 ``#`` 开头的说明行（示例 CSV 用它标注“非论文结果”）。
+    lines = [
+        line
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    reader = csv.DictReader(lines)
+    fieldnames = tuple(reader.fieldnames or ())
+    missing = [name for name in REQUIRED_COLUMNS if name not in fieldnames]
+    if missing:
+        raise ValueError(
+            f"{path} 缺少列：{', '.join(missing)}；请重新运行 aggregate.py"
+        )
+    return list(reader)
 
 
 def mse_value(row: dict[str, str]) -> float | None:
@@ -173,6 +186,39 @@ def is_ablation_model(name: str) -> bool:
     return any(keyword in lowered for keyword in ABLATION_KEYWORDS)
 
 
+def std_value(row: dict[str, str]) -> float | None:
+    """解析 ``mse_std``；空值或非法值返回 ``None``。"""
+    raw = row.get("mse_std", "")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
+def main_protocol_rows(rows: Sequence[dict[str, str]]) -> list[dict[str, str]]:
+    """返回主实验行：排除消融，并优先固定 ``seq_len=96``。
+
+    回看扫描会为同一数据集/模型生成多个 ``seq_len``；主图和模型对比若不过滤，
+    会把不同回看长度混在一起平均。若 summary 中没有 96，则退回最小值。
+    """
+    non_ablation = [row for row in rows if not is_ablation_row(row)]
+    seq_lens: list[int] = []
+    for row in non_ablation:
+        raw = row.get("seq_len", "")
+        if raw.isdigit():
+            seq_lens.append(int(raw))
+    target = 96 if 96 in seq_lens else (min(seq_lens) if seq_lens else None)
+    if target is None:
+        return non_ablation
+    return [
+        row
+        for row in non_ablation
+        if not row.get("seq_len", "").isdigit() or int(row["seq_len"]) == target
+    ]
+
+
 def plot_mse_by_horizon(rows: Sequence[dict[str, str]], out_path: Path) -> None:
     """每个数据集一个子图，画出各模型 MSE 随预测长度的折线。
 
@@ -180,6 +226,7 @@ def plot_mse_by_horizon(rows: Sequence[dict[str, str]], out_path: Path) -> None:
         rows: 汇总 CSV 的行列表。
         out_path: 输出图片路径。
     """
+    rows = main_protocol_rows(rows)
     datasets = sorted({row["dataset"] for row in rows})
     models = sorted({row["model"] for row in rows})
     n_cols = min(3, len(datasets))
@@ -191,20 +238,28 @@ def plot_mse_by_horizon(rows: Sequence[dict[str, str]], out_path: Path) -> None:
     for index, dataset in enumerate(datasets):
         axis = axes[index // n_cols][index % n_cols]
         for model in models:
-            points: list[tuple[int, float]] = []
+            points: list[tuple[int, float, float | None]] = []
             for row in rows:
                 if row["dataset"] != dataset or row["model"] != model:
                     continue
                 value = mse_value(row)
                 if value is None:
                     continue
-                points.append((int(row["pred_len"]), value))
+                points.append((int(row["pred_len"]), value, std_value(row)))
             if not points:
                 continue
             points.sort()
             x_values = [point[0] for point in points]
             y_values = [point[1] for point in points]
-            axis.plot(x_values, y_values, marker="o", label=model)
+            errors = [0.0 if point[2] is None else point[2] for point in points]
+            axis.errorbar(
+                x_values,
+                y_values,
+                yerr=errors,
+                marker="o",
+                capsize=2,
+                label=model,
+            )
         axis.set_title(dataset)
         axis.set_xlabel("pred_len")
         axis.set_ylabel("MSE (normalized)")
@@ -226,7 +281,7 @@ def plot_model_comparison(rows: Sequence[dict[str, str]], out_path: Path) -> Non
         rows: 汇总 CSV 的行列表。
         out_path: 输出图片路径。
     """
-    stats = stats_by_model(rows)
+    stats = stats_by_model(main_protocol_rows(rows))
     datasets = sorted({key[0] for key in stats})
     all_models = sorted({key[1] for key in stats})
     models = [
@@ -328,6 +383,84 @@ def plot_ablation(rows: Sequence[dict[str, str]], out_path: Path) -> bool:
     return True
 
 
+def plot_lookback(rows: Sequence[dict[str, str]], out_path: Path) -> bool:
+    """画出 MSE 随回看长度 ``seq_len`` 的变化；不足两个长度时跳过。
+
+    每个子图对应一个数据集，横轴为 ``seq_len``；同一数据集内固定
+    ``pred_len=96``（不存在时取最小预测长度），按模型画折线。误差棒来自
+    种子间标准差。
+
+    Args:
+        rows: 汇总 CSV 的行列表。
+        out_path: 输出图片路径。
+
+    Returns:
+        ``True`` 表示已生成图片，``False`` 表示没有可画的多回看长度数据。
+    """
+    non_ablation = [row for row in rows if not is_ablation_row(row)]
+    seq_lens = {
+        int(row["seq_len"]) for row in non_ablation if row.get("seq_len", "").isdigit()
+    }
+    if len(seq_lens) < 2:
+        logger.info("summary 中只有一个 seq_len，跳过回看曲线")
+        return False
+
+    pred_lens = {
+        int(row["pred_len"])
+        for row in non_ablation
+        if row.get("pred_len", "").isdigit()
+    }
+    target_pred = 96 if 96 in pred_lens else min(pred_lens)
+    rows = [
+        row
+        for row in non_ablation
+        if row.get("pred_len", "").isdigit() and int(row["pred_len"]) == target_pred
+    ]
+    datasets = sorted({row["dataset"] for row in rows})
+    if not datasets:
+        return False
+    models = sorted({row["model"] for row in rows})
+    n_cols = min(2, len(datasets))
+    n_rows = math.ceil(len(datasets) / n_cols)
+    figure, axes = plt.subplots(
+        n_rows, n_cols, figsize=(4.8 * n_cols, 3.8 * n_rows), squeeze=False
+    )
+    for index, dataset in enumerate(datasets):
+        axis = axes[index // n_cols][index % n_cols]
+        for model in models:
+            points = []
+            for row in rows:
+                if row["dataset"] != dataset or row["model"] != model:
+                    continue
+                value = mse_value(row)
+                if value is None:
+                    continue
+                points.append((int(row["seq_len"]), value, std_value(row)))
+            if not points:
+                continue
+            points.sort()
+            axis.errorbar(
+                [point[0] for point in points],
+                [point[1] for point in points],
+                yerr=[0.0 if point[2] is None else point[2] for point in points],
+                marker="o",
+                capsize=2,
+                label=model,
+            )
+        axis.set_title(f"{dataset} (pred_len={target_pred})")
+        axis.set_xlabel("seq_len")
+        axis.set_ylabel("MSE (normalized)")
+        axis.grid(alpha=0.3)
+        axis.legend(fontsize=8)
+    for index in range(len(datasets), n_rows * n_cols):
+        figure.delaxes(axes[index // n_cols][index % n_cols])
+    figure.suptitle("Test MSE by lookback length")
+    figure.tight_layout()
+    figure.savefig(out_path, dpi=150)
+    plt.close(figure)
+    return True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """生成图表并返回退出码。
 
@@ -354,15 +487,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{args.summary} 中没有数据行。")
         return 1
 
-    figures_dir = args.summary.parent / "figures"
+    figures_dir = args.figures_dir
     figures_dir.mkdir(parents=True, exist_ok=True)
     plot_mse_by_horizon(rows, figures_dir / "mse_by_horizon.png")
     plot_model_comparison(rows, figures_dir / "model_comparison.png")
     has_ablation = plot_ablation(rows, figures_dir / "ablation.png")
+    has_lookback = plot_lookback(rows, figures_dir / "lookback_curve.png")
 
     names = ["mse_by_horizon.png", "model_comparison.png"]
     if has_ablation:
         names.append("ablation.png")
+    if has_lookback:
+        names.append("lookback_curve.png")
     print(f"已生成 {len(names)} 张图到 {figures_dir}：{', '.join(names)}")
     return 0
 

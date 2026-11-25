@@ -30,12 +30,14 @@ def make_config(**overrides: object) -> ModelConfig:
 @pytest.mark.parametrize(
     ("variate_module", "temporal_module"),
     [
+        # 论文表 3/6 的六种设计：完整、Replace Attn→Attn、
+        # Replace Attn→FFN、Replace FFN→FFN、w/o Attention、w/o FFN。
         ("attention", "ffn"),
-        ("ffn", "ffn"),
         ("attention", "attention"),
+        ("ffn", "attention"),
+        ("ffn", "ffn"),
         ("none", "ffn"),
         ("attention", "none"),
-        ("none", "none"),
     ],
 )
 def test_itransformer_variants_return_expected_shape(
@@ -46,6 +48,24 @@ def test_itransformer_variants_return_expected_shape(
     output = model(torch.randn(BATCH, SEQ_LEN, N_VARS))
     assert tuple(output.shape) == (BATCH, PRED_LEN, N_VARS)
     assert torch.isfinite(output).all()
+
+
+def test_attention_map_has_one_matrix_per_head() -> None:
+    config = make_config()
+    model = build_model(config, SEQ_LEN, PRED_LEN, N_VARS)
+    model.eval()
+    weights = model.attention_map(torch.randn(BATCH, SEQ_LEN, N_VARS))
+    assert tuple(weights.shape) == (BATCH, config.n_heads, N_VARS, N_VARS)
+    assert torch.allclose(
+        weights.sum(dim=-1), torch.ones(BATCH, config.n_heads, N_VARS), atol=1e-5
+    )
+
+
+def test_attention_map_rejects_non_attention_variant() -> None:
+    config = make_config(variate_module="ffn")
+    model = build_model(config, SEQ_LEN, PRED_LEN, N_VARS)
+    with pytest.raises(ValueError, match="不是 attention"):
+        model.attention_map(torch.randn(BATCH, SEQ_LEN, N_VARS))
 
 
 def test_itransformer_accepts_optional_position_embedding() -> None:

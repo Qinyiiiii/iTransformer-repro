@@ -1,7 +1,7 @@
 experiment: itransformer_ETTh1_h96
 seed: 2021
 device: auto
-runs_dir: runs
+runs_dir: results/raw
 
 data:
   name: ETTh1
@@ -25,7 +25,7 @@ model:
   use_pos_embed: false
 
 train:
-  batch_size: 16
+  batch_size: 32
   learning_rate: 0.001
   epochs: 10
   patience: 0

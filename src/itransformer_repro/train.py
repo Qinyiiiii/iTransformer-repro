@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import copy
+import random
 import time
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,7 @@ from itransformer_repro.utils import (
     environment_info,
     get_logger,
     git_commit,
+    git_dirty,
     resolve_device,
     save_json,
     seed_everything,
@@ -32,8 +33,12 @@ def make_loader(
     batch_size: int,
     shuffle: bool,
     num_workers: int = 0,
+    drop_last: bool = False,
 ) -> DataLoader:
     """把窗口数据集包装为 ``DataLoader``。
+
+    ``drop_last`` 只应在训练集上为 ``True``（与官方实现一致，避免最后一个
+    不完整 batch 影响 BatchNorm/统计），验证与测试必须保留全部窗口。
 
     Raises:
         ValueError: 数据集没有任何窗口（通常是切分或 ``seq_len`` 设置错误）。
@@ -45,7 +50,7 @@ def make_loader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        drop_last=False,
+        drop_last=drop_last and len(dataset) >= batch_size,
     )
 
 
@@ -118,8 +123,10 @@ def evaluate_model(
 def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, Any]:
     """训练、验证、测试并落盘一次实验的全部证据。
 
-    产出目录 ``runs/<experiment>/seed<seed>/`` 包含 ``config.json``、
-    ``metrics.json``、``train.log``、``pred.npy`` 与 ``model.pt``。
+    产出目录 ``results/raw/<model>/<dataset>/h<S>/[<variant>/]seed<seed>/``
+    包含 ``config.json``、``metrics.json``、``train.log``、``pred.npy``、
+    ``true.npy`` 与 ``model.pt``；开启 ``train.save_train_state`` 时额外保存
+    ``train_state.pt``（模型、优化器、epoch 与随机状态）。
 
     Args:
         config: 完整实验配置。
@@ -137,8 +144,11 @@ def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, A
 
     run_dir.mkdir(parents=True, exist_ok=True)
     logger = get_logger("itransformer_repro.train", run_dir / "train.log")
+    run_started_at = time.perf_counter()
     seed_everything(config.seed)
     device = resolve_device(config.device)
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
     logger.info(
         "experiment=%s seed=%d device=%s",
         config.experiment,
@@ -169,6 +179,7 @@ def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, A
         {
             **config.to_dict(),
             "git_commit": git_commit(),
+            "git_dirty": git_dirty(),
             "environment": environment_info(),
             "n_params": n_params,
         },
@@ -177,7 +188,11 @@ def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, A
     criterion = nn.MSELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config.train.learning_rate)
     train_loader = make_loader(
-        bundle.train, config.train.batch_size, True, config.train.num_workers
+        bundle.train,
+        config.train.batch_size,
+        True,
+        config.train.num_workers,
+        drop_last=True,
     )
     val_loader = make_loader(
         bundle.val, config.train.batch_size, False, config.train.num_workers
@@ -191,13 +206,18 @@ def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, A
     best_epoch = 0
     epochs_without_improvement = 0
     epoch_times: list[float] = []
-    started_at = time.perf_counter()
+    train_seconds = 0.0
+    val_seconds = 0.0
 
     for epoch in range(1, config.train.epochs + 1):
         epoch_start = time.perf_counter()
         train_loss = train_one_epoch(model, train_loader, optimizer, criterion, device)
+        train_end = time.perf_counter()
         val_metrics, _, _ = evaluate_model(model, val_loader, device, criterion)
-        duration = time.perf_counter() - epoch_start
+        epoch_end = time.perf_counter()
+        train_seconds += train_end - epoch_start
+        val_seconds += epoch_end - train_end
+        duration = epoch_end - epoch_start
         epoch_times.append(round(duration, 4))
         logger.info(
             "epoch %d/%d train_loss=%.6f val_mse=%.6f val_mae=%.6f %.2fs",
@@ -210,7 +230,10 @@ def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, A
         )
         if val_metrics["mse"] < best_val_mse:
             best_val_mse = val_metrics["mse"]
-            best_state = copy.deepcopy(model.state_dict())
+            best_state = {
+                name: tensor.detach().cpu().clone()
+                for name, tensor in model.state_dict().items()
+            }
             best_epoch = epoch
             epochs_without_improvement = 0
         else:
@@ -227,8 +250,12 @@ def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, A
     if best_state is not None:
         model.load_state_dict(best_state)
 
-    test_metrics, predictions, _ = evaluate_model(model, test_loader, device, criterion)
-    total_time = time.perf_counter() - started_at
+    inference_started_at = time.perf_counter()
+    test_metrics, predictions, targets = evaluate_model(
+        model, test_loader, device, criterion
+    )
+    inference_time = time.perf_counter() - inference_started_at
+    total_time = time.perf_counter() - run_started_at
     result: dict[str, Any] = {
         "experiment": config.experiment,
         "seed": config.seed,
@@ -250,14 +277,31 @@ def run_experiment(config: ExperimentConfig, force: bool = False) -> dict[str, A
         },
         "epochs_run": len(epoch_times),
         "epoch_time_sec": epoch_times,
-        "train_time_sec": round(total_time, 2),
+        "train_time_sec": round(train_seconds, 2),
+        "val_time_sec": round(val_seconds, 2),
+        "inference_time_sec": round(inference_time, 2),
+        "total_time_sec": round(total_time, 2),
         "peak_memory_mb": _peak_memory_mb(device),
         "device": str(device),
     }
 
     save_json(run_dir / "metrics.json", result)
     np.save(run_dir / "pred.npy", predictions)
+    np.save(run_dir / "true.npy", targets)
     torch.save(model.state_dict(), run_dir / "model.pt")
+    if config.train.save_train_state:
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "epoch": best_epoch,
+                "seed": config.seed,
+                "torch_rng": torch.get_rng_state(),
+                "numpy_rng": np.random.get_state(),
+                "python_rng": random.getstate(),
+            },
+            run_dir / "train_state.pt",
+        )
     logger.info(
         "finished test_mse=%.6f test_mae=%.6f time=%.1fs",
         result["mse"],

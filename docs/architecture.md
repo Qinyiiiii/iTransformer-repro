@@ -14,7 +14,7 @@
 | `train.py` | 训练循环、验证集选模、测试评估、运行产物落盘 | `make_loader`、`train_one_epoch`、`evaluate_model`、`run_experiment`、`run_exists` |
 | `evaluate.py` | 加载已保存的 `config.json` 与 `model.pt` 复评测试集 | `config_from_dict`、`evaluate_run` |
 | `metrics.py` | 标准化空间内的指标计算 | `mse`、`mae`、`rmse`、`mape`、`compute_all` |
-| `utils.py` | 随机性控制、日志、JSON 读写、设备解析、git 与环境记录 | `seed_everything`、`get_logger`、`save_json`、`load_json`、`count_parameters`、`resolve_device`、`git_commit`、`environment_info` |
+| `utils.py` | 随机性控制、日志、JSON 读写、设备解析、git 与环境记录 | `seed_everything`、`get_logger`、`save_json`、`load_json`、`count_parameters`、`resolve_device`、`project_root`、`git_commit`、`git_dirty`、`environment_info` |
 | `cli.py` | 命令行入口与子命令分发 | `main`、`build_parser`、`collect_overrides`、`command_train`、`command_check_data`、`command_evaluate` |
 
 依赖方向是单向的：`cli → train/evaluate → data/models/metrics/utils → config`，
@@ -41,8 +41,10 @@
   $A_{i,j} \propto \exp\left(q_i^{\top} k_j / \sqrt{d_k}\right)$，即变量 $i$ 与变量
   $j$ 的依赖强度。
 - **残差 + 后归一化（post-norm）**：`InvertedBlock.forward` 先计算
-  `norm1(x + Variate(x))`，再计算 `norm2(x + Temporal(x))`，与官方
-  `EncoderLayer` 的顺序一致；两个子层都可被开关置空（置空时连同残差一起跳过）。
+  `norm1(x + Dropout(Variate(x)))`，再计算
+  `norm2(x + Dropout(Temporal(x)))`，与官方 `EncoderLayer` 的顺序一致；子层被
+  开关置空时只跳过混合模块与残差，`norm1`/`norm2` 仍保留（对应"w/o Attention /
+  w/o FFN"消融）。
 - **嵌入后 dropout**：`ITransformer.forward` 在 `Linear(T, D)` 与可选位置编码之后、
   进入编码块之前有一层 `nn.Dropout`；全部编码块之后再对 token 做一次最终
   LayerNorm，然后才进入投影层。
@@ -115,16 +117,16 @@ $$
 | 取值 | 实际模块 | 语义 |
 | --- | --- | --- |
 | `attention` | `VariateAttention` | 在 `N` 个变量 token 之间做多头自注意力，token 可互相读取信息 |
-| `ffn` | `VariateMlp` | 在 **N 维**做 token mixing：`(B,N,D)` 转置为 `(B,D,N)` → `Linear(N, 2N)` → `GELU` → `Linear(2N, N)` → 转置回 `(B,N,D)` |
-| `none` | `None` | 整个变量子层**及其残差**被移除，`InvertedBlock` 只做时间维混合 |
+| `ffn` | `VariateMlp` | 在 **N 维**做 token mixing：`(B,N,D)` 转置为 `(B,D,N)` → `Linear(N, 2N)` → `ReLU` → `Linear(2N, N)` → 转置回 `(B,N,D)` |
+| `none` | `None` | 跳过变量混合与残差，只保留 `norm1`，`InvertedBlock` 继续做时间维混合 |
 
 ### 4.2 `temporal_module`（时间维混合）
 
 | 取值 | 实际模块 | 语义 |
 | --- | --- | --- |
-| `ffn` | `PositionwiseFFN` | 对每个变量 token 独立施加 `Linear(D, d_ff) → GELU → Dropout → Linear(d_ff, D)`，即论文的时间维 FFN |
+| `ffn` | `PositionwiseFFN` | 对每个变量 token 独立施加 `Linear(D, d_ff) → ReLU → Dropout → Linear(d_ff, D)`，子层输出再由 `InvertedBlock.dropout2` 做一次 Dropout；与官方 `EncoderLayer` 的 Conv1d+ReLU 及 dropout 位置等价 |
 | `attention` | `TemporalAttention` | **近似实现**：把每个 token 的 `D` 维表征切成 `n_groups=8` 组，把每组当作一个"时间 token"，在组间做多头注意力，再拼回 `D` 维 |
-| `none` | `None` | 整个时间子层**及其残差**被移除 |
+| `none` | `None` | 跳过时间混合与残差，只保留 `norm2` |
 
 `TemporalAttention` 的实现细节（与本项目实现绑定，原文只给定性描述）：
 
@@ -146,14 +148,20 @@ $$
 | `use_layernorm` | `True` 时 `norm1`、`norm2` 与最终 `norm` 为 `nn.LayerNorm(d_model)`；`False` 时替换为 `nn.Identity()`，用于"去 LayerNorm"消融 |
 | `use_pos_embed` | `True` 时创建形状 `(1, N, D)` 的可学习参数并加到变量 token 上；主方法默认 `False` |
 
-`configs/` 已附四份消融配置：
+`configs/` 已附五份消融配置，与论文表 3/6 的六种设计一一对应：
 
-| 配置文件 | 开关 |
-| --- | --- |
-| `configs/ablation_no_attention.yaml` | `variate_module: none` |
-| `configs/ablation_no_ffn.yaml` | `temporal_module: none` |
-| `configs/ablation_variate_ffn.yaml` | `variate_module: ffn` |
-| `configs/ablation_temporal_attn.yaml` | `temporal_module: attention` |
+| 论文设计 | 配置文件 | 开关 |
+| --- | --- | --- |
+| 完整 iTransformer | `configs/default.yaml` | `attention` + `ffn` |
+| Replace Attention→Attention | `configs/ablation_temporal_attn.yaml` | `attention` + `attention` |
+| Replace Attention→FFN | `configs/ablation_variate_ffn_temporal_attn.yaml` | `ffn` + `attention` |
+| Replace FFN→FFN | `configs/ablation_variate_ffn.yaml` | `ffn` + `ffn` |
+| w/o Attention | `configs/ablation_no_attention.yaml` | `none` + `ffn` |
+| w/o FFN | `configs/ablation_no_ffn.yaml` | `attention` + `none` |
+
+`ITransformer.attention_map(inputs, layer_index)` 返回
+`(B, n_heads, N, N)` 的变量间注意力权重，供热图/可解释性分析；要求该层
+`variate_module=attention`，否则抛出 `ValueError`。
 
 "去 LayerNorm"与"加位置编码"没有单独的 YAML，可用
 `--set model.use_layernorm=false` 或 `--set model.use_pos_embed=true` 覆盖后运行。

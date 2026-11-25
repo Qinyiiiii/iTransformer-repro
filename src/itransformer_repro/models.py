@@ -33,6 +33,25 @@ class VariateAttention(nn.Module):
         attended, _ = self.attention(tokens, tokens, tokens, need_weights=False)
         return attended
 
+    def attention_map(self, tokens: torch.Tensor) -> torch.Tensor:
+        """返回变量间注意力权重，供可解释性分析使用。
+
+        Args:
+            tokens: 形状 ``(B, N, D)`` 的变量 token。
+
+        Returns:
+            形状 ``(B, n_heads, N, N)`` 的注意力权重；调用前应把模型切到
+            ``eval()``，避免 dropout 干扰。
+        """
+        _, weights = self.attention(
+            tokens,
+            tokens,
+            tokens,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+        return weights
+
 
 class VariateMlp(nn.Module):
     """变量维的 token-mixing MLP，用作"去掉注意力"的替代混合模块。"""
@@ -40,7 +59,7 @@ class VariateMlp(nn.Module):
     def __init__(self, n_vars: int, expansion: int = 2) -> None:
         super().__init__()
         self.fc1 = nn.Linear(n_vars, n_vars * expansion)
-        self.activation = nn.GELU()
+        self.activation = nn.ReLU()
         self.fc2 = nn.Linear(n_vars * expansion, n_vars)
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
@@ -60,9 +79,11 @@ class PositionwiseFFN(nn.Module):
 
     def __init__(self, d_model: int, d_ff: int, dropout: float) -> None:
         super().__init__()
+        # 与官方 EncoderLayer 一致：激活后一次 dropout；子层输出的 dropout
+        # 由 InvertedBlock 的 dropout2 施加，避免重复。
         self.net = nn.Sequential(
             nn.Linear(d_model, d_ff),
-            nn.GELU(),
+            nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(d_ff, d_model),
         )
@@ -137,17 +158,27 @@ class InvertedBlock(nn.Module):
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model) if use_layernorm else nn.Identity()
         self.norm2 = nn.LayerNorm(d_model) if use_layernorm else nn.Identity()
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
         self.variate = _build_variate(n_vars, d_model, n_heads, dropout, variate_module)
         self.temporal = _build_temporal(
             d_model, d_ff, n_heads, dropout, temporal_module
         )
 
     def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        """先变量混合后时间混合，每个子层为"残差 + 归一化"。"""
+        """先变量混合后时间混合，每个子层为"残差 + 归一化"。
+
+        ``variate_module`` 或 ``temporal_module`` 为 ``"none"`` 时只跳过对应的
+        混合模块，归一化仍保留；这与"w/o Attention / w/o FFN"消融的语义一致。
+        """
         if self.variate is not None:
-            tokens = self.norm1(tokens + self.variate(tokens))
+            tokens = self.norm1(tokens + self.dropout1(self.variate(tokens)))
+        else:
+            tokens = self.norm1(tokens)
         if self.temporal is not None:
-            tokens = self.norm2(tokens + self.temporal(tokens))
+            tokens = self.norm2(tokens + self.dropout2(self.temporal(tokens)))
+        else:
+            tokens = self.norm2(tokens)
         return tokens
 
 
@@ -232,6 +263,13 @@ class ITransformer(nn.Module):
         self.norm = nn.LayerNorm(d_model) if use_layernorm else nn.Identity()
         self.projector = nn.Linear(d_model, pred_len)
 
+    def _embed(self, inputs: torch.Tensor) -> torch.Tensor:
+        """把 ``(B, T, N)`` 输入嵌入为 ``(B, N, D)`` 的变量 token。"""
+        tokens = self.embedding(inputs.transpose(1, 2))
+        if self.position_embedding is not None:
+            tokens = tokens + self.position_embedding
+        return self.embed_dropout(tokens)
+
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         """Args:
             inputs: 形状 ``(B, T, N)`` 的回看窗口。
@@ -239,14 +277,39 @@ class ITransformer(nn.Module):
         Returns:
             形状 ``(B, S, N)`` 的预测。
         """
-        tokens = self.embedding(inputs.transpose(1, 2))
-        if self.position_embedding is not None:
-            tokens = tokens + self.position_embedding
-        tokens = self.embed_dropout(tokens)
+        tokens = self._embed(inputs)
         for block in self.blocks:
             tokens = block(tokens)
         tokens = self.norm(tokens)
         return self.projector(tokens).transpose(1, 2)
+
+    def attention_map(
+        self, inputs: torch.Tensor, layer_index: int = -1
+    ) -> torch.Tensor:
+        """返回指定倒置层的变量间注意力权重，用于可解释性分析。
+
+        Args:
+            inputs: 形状 ``(B, T, N)`` 的回看窗口。
+            layer_index: 层索引，默认最后一层（与 Python 负索引一致）。
+
+        Returns:
+            形状 ``(B, n_heads, N, N)`` 的注意力权重。
+
+        Raises:
+            IndexError: ``layer_index`` 越界。
+            ValueError: 指定层的变量维模块不是注意力（消融配置）。
+        """
+        n_layers = len(self.blocks)
+        if not -n_layers <= layer_index < n_layers:
+            raise IndexError(f"layer_index={layer_index} 超出 [0, {n_layers})")
+        target = layer_index % n_layers
+        block = self.blocks[target]
+        if not isinstance(block.variate, VariateAttention):
+            raise ValueError("指定层的 variate_module 不是 attention，无法提取权重")
+        tokens = self._embed(inputs)
+        for previous in list(self.blocks)[:target]:
+            tokens = previous(tokens)
+        return block.variate.attention_map(tokens)
 
 
 class SeriesDecomposition(nn.Module):

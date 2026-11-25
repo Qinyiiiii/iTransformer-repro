@@ -13,6 +13,7 @@ from itransformer_repro.config import coerce_scalar, load_config, validate_confi
 from itransformer_repro.data import dataset_card
 from itransformer_repro.evaluate import evaluate_run
 from itransformer_repro.train import run_experiment
+from itransformer_repro.utils import save_json
 
 _OVERRIDE_FLAGS = {
     "seed": "seed",
@@ -53,6 +54,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     check = subparsers.add_parser("check-data", help="校验数据集并打印数据集卡片。")
     check.add_argument("--config", type=Path, required=True, help="YAML 配置文件路径。")
+    check.add_argument(
+        "--strict", action="store_true", help="行数与官方发布版本不符时也返回失败。"
+    )
+    check.add_argument("--out", type=Path, help="把数据集卡片另存为 JSON。")
+    check.add_argument(
+        "--set",
+        nargs="*",
+        default=[],
+        metavar="KEY=VALUE",
+        help="点号覆盖，例如 data.seq_len=192 data.pred_len=336。",
+    )
 
     evaluate = subparsers.add_parser("evaluate", help="重算一次已完成运行的指标。")
     evaluate.add_argument("--run-dir", type=Path, required=True, help="运行输出目录。")
@@ -99,27 +111,37 @@ def command_train(args: argparse.Namespace) -> int:
 
 
 def command_check_data(args: argparse.Namespace) -> int:
-    """执行 ``check-data``；变量数不符时返回非零退出码。"""
-    config = load_config(args.config)
+    """执行 ``check-data``；变量数（或 strict 下的行数）不符时返回非零。"""
+    config = load_config(args.config, collect_overrides(args))
     try:
-        card = dataset_card(config.data)
+        card = dataset_card(config.data, strict=args.strict)
     except (FileNotFoundError, ValueError) as exc:
         print(f"ERROR: {exc}")
         return 1
+    if args.out is not None:
+        save_json(args.out, card)
     print(json.dumps(card, indent=2, ensure_ascii=False))
     if not card["passed"]:
-        print("FAIL: 变量数与基准规格不一致")
+        print("FAIL: 数据文件与基准规格不一致")
         return 1
+    if not card["rows_match"]:
+        print("WARN: 行数与官方发布版本不同；如需严格校验请加 --strict")
     return 0
 
 
 def command_evaluate(args: argparse.Namespace) -> int:
     """执行 ``evaluate``，打印重算指标。"""
-    metrics = evaluate_run(args.run_dir)
+    try:
+        metrics = evaluate_run(args.run_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"ERROR: {exc}")
+        return 1
     print(
         f"recomputed mse={metrics['mse']:.6f} mae={metrics['mae']:.6f} "
         f"device={metrics['device']}"
     )
+    if "matches_original" in metrics:
+        print(f"matches_original={metrics['matches_original']}")
     return 0
 
 

@@ -86,6 +86,7 @@ class TrainConfig:
     epochs: int = 10
     patience: int = 0
     num_workers: int = 0
+    save_train_state: bool = False
 
 
 @dataclass(frozen=True)
@@ -95,7 +96,7 @@ class ExperimentConfig:
     experiment: str
     seed: int = 2021
     device: str = "auto"
-    runs_dir: str = "runs"
+    runs_dir: str = "results/raw"
     data: DataConfig = field(default_factory=DataConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
@@ -105,8 +106,29 @@ class ExperimentConfig:
         return asdict(self)
 
     def run_dir(self) -> Path:
-        """返回该次运行的输出目录 ``runs/<experiment>/seed<seed>``。"""
-        return Path(self.runs_dir) / self.experiment / f"seed{self.seed}"
+        """返回该次运行的输出目录。
+
+        目录遵循 ``results/raw/<model>/<dataset>/h<S>/<variant>/seed<seed>``：
+        主实验省略 ``variant``，消融或其它变体使用去掉 ``_<dataset>_h<S>`` 后缀
+        的实验名，保证每个结果都有唯一且可读的路径。
+        """
+        base = (
+            Path(self.runs_dir)
+            / self.model.name
+            / self.data.name
+            / f"h{self.data.pred_len}"
+        )
+        default_name = f"{self.model.name}_{self.data.name}_h{self.data.pred_len}"
+        variant = self.experiment
+        if variant == default_name:
+            variant = ""
+        else:
+            suffix = f"_{self.data.name}_h{self.data.pred_len}"
+            if variant.endswith(suffix):
+                variant = variant[: -len(suffix)]
+        if variant:
+            base = base / variant
+        return base / f"seed{self.seed}"
 
 
 def coerce_scalar(text: str) -> bool | int | float | str:
@@ -237,7 +259,7 @@ def load_config(
             experiment=str(raw.get("experiment", path.stem)),
             seed=int(raw.get("seed", 2021)),
             device=str(raw.get("device", "auto")),
-            runs_dir=str(raw.get("runs_dir", "runs")),
+            runs_dir=str(raw.get("runs_dir", "results/raw")),
             data=DataConfig(**raw.get("data", {})),
             model=ModelConfig(**raw.get("model", {})),
             train=TrainConfig(**raw.get("train", {})),

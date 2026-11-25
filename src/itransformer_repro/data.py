@@ -8,11 +8,14 @@
 * 标准化统计量只在训练段上拟合，验证段与测试段共用同一组统计量，避免信息泄漏。
 
 窗口约定：窗口起点为 ``i`` 时使用 ``data[i : i+T]`` 预测 ``data[i+T : i+T+S]``，
-因此某段的窗口数为 ``end - start - T - S + 1``。
+因此某段的窗口数为 ``end - start - T - S + 1``。论文表 4 的 ETT 数字
+（如 ETTh1 8545/2881/2881）只数回看起点、不扣 ``pred_len``，比本口径多
+``pred_len`` 个；``dataset_card`` 同时给出两种口径以便核对。
 """
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,23 +38,25 @@ class DatasetSpec:
         n_vars: 变量（通道）数。
         freq: 采样频率标签，用于 ETT 的月份换算。
         split_rule: ``"ett"`` 表示 12/4/4 个月切分，``"ratio"`` 表示 70/10/20。
+        expected_rows: 官方发布文件的数据行数（不含表头）；仅用于完整性告警。
     """
 
     filename: str
     n_vars: int
     freq: str
     split_rule: str
+    expected_rows: int | None = None
 
 
 DATASET_SPECS: dict[str, DatasetSpec] = {
-    "ETTh1": DatasetSpec("ETT-small/ETTh1.csv", 7, "1h", "ett"),
-    "ETTh2": DatasetSpec("ETT-small/ETTh2.csv", 7, "1h", "ett"),
-    "ETTm1": DatasetSpec("ETT-small/ETTm1.csv", 7, "15min", "ett"),
-    "ETTm2": DatasetSpec("ETT-small/ETTm2.csv", 7, "15min", "ett"),
-    "Weather": DatasetSpec("weather/weather.csv", 21, "10min", "ratio"),
-    "ECL": DatasetSpec("electricity/electricity.csv", 321, "1h", "ratio"),
-    "Traffic": DatasetSpec("traffic/traffic.csv", 862, "1h", "ratio"),
-    "Exchange": DatasetSpec("exchange_rate/exchange_rate.csv", 8, "1d", "ratio"),
+    "ETTh1": DatasetSpec("ETT-small/ETTh1.csv", 7, "1h", "ett", 17420),
+    "ETTh2": DatasetSpec("ETT-small/ETTh2.csv", 7, "1h", "ett", 17420),
+    "ETTm1": DatasetSpec("ETT-small/ETTm1.csv", 7, "15min", "ett", 69680),
+    "ETTm2": DatasetSpec("ETT-small/ETTm2.csv", 7, "15min", "ett", 69680),
+    "Weather": DatasetSpec("weather/weather.csv", 21, "10min", "ratio", 52696),
+    "ECL": DatasetSpec("electricity/electricity.csv", 321, "1h", "ratio", 26304),
+    "Traffic": DatasetSpec("traffic/traffic.csv", 862, "1h", "ratio", 17544),
+    "Exchange": DatasetSpec("exchange_rate/exchange_rate.csv", 8, "1d", "ratio", 7588),
 }
 
 
@@ -308,15 +313,27 @@ def build_datasets(config: DataConfig) -> DataBundle:
     return bundle
 
 
-def dataset_card(config: DataConfig) -> dict[str, Any]:
+def _sha256(path: Path) -> str:
+    """以 1 MiB 分块计算文件 SHA256，用于记录数据版本。"""
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def dataset_card(config: DataConfig, strict: bool = False) -> dict[str, Any]:
     """生成 ``check-data`` 数据集卡片，用于校验与实验记录。
 
     Args:
         config: 数据配置。
+        strict: 为 ``True`` 时把行数与官方发布版本不一致也视为失败。
 
     Returns:
-        含文件路径、行数、变量数、切分窗口数与边界的字典；变量数不符时
-        ``passed`` 为 ``False`` 且不给出窗口统计。
+        含文件哈希、行数、变量数、切分窗口数、边界以及论文表 4 计数口径的
+        字典。``split_windows`` 是严格样本数（扣掉 ``pred_len``），
+        ``paper_table4_windows`` 只数回看起点（不扣 ``pred_len``），用于和
+        论文表 4 的 8545/2881/2881 对齐。
 
     Raises:
         FileNotFoundError: 数据文件不存在。
@@ -326,29 +343,51 @@ def dataset_card(config: DataConfig) -> dict[str, Any]:
     path = resolve_path(config)
     values = load_frame(path)
     rows, n_vars = values.shape
+    vars_ok = int(n_vars) == spec.n_vars
+    rows_ok = spec.expected_rows is None or int(rows) == spec.expected_rows
     card: dict[str, Any] = {
         "dataset": config.name,
         "path": str(path),
+        "size_bytes": path.stat().st_size,
+        "sha256": _sha256(path),
         "rows": int(rows),
+        "expected_rows": spec.expected_rows,
+        "rows_match": rows_ok,
         "n_vars": int(n_vars),
         "expected_n_vars": spec.n_vars,
+        "vars_match": vars_ok,
         "freq": spec.freq,
         "split_rule": spec.split_rule,
         "seq_len": config.seq_len,
         "pred_len": config.pred_len,
-        "passed": int(n_vars) == spec.n_vars,
+        "passed": vars_ok and (rows_ok or not strict),
         "split_windows": None,
+        "paper_table4_windows": None,
         "borders": None,
     }
-    if not card["passed"]:
+    if not vars_ok:
         card["message"] = "变量数与基准规格不一致，请检查数据文件是否完整"
         return card
+    if not rows_ok:
+        card["message"] = (
+            f"行数 {rows} 与官方发布版本 {spec.expected_rows} 不一致；"
+            "可能是数据版本不同或文件被截断"
+        )
+    try:
+        bundle, borders = _build_bundle(values, spec, config)
+    except ValueError as exc:
+        card["passed"] = False
+        card["message"] = str(exc)
+        return card
 
-    bundle, borders = _build_bundle(values, spec, config)
     card["split_windows"] = {
         "train": len(bundle.train),
         "val": len(bundle.val),
         "test": len(bundle.test),
+    }
+    card["paper_table4_windows"] = {
+        name: max(0, end - start - config.seq_len + 1)
+        for name, (start, end) in borders.items()
     }
     card["borders"] = {key: list(value) for key, value in borders.items()}
     return card

@@ -1,0 +1,20 @@
+# 项目依赖（Python >=3.9,<3.13）
+# 版本下限取本仓库审计环境中实际通过 ruff / pytest 与 ETTh1 冒烟的版本：
+#   Python 3.9.13, numpy 1.21.5, pandas 1.2.4, PyYAML 6.0, matplotlib 3.5.1,
+#   torch 2.8.0+cpu, pytest 7.1.2, pytest-cov 7.1.0, ruff 0.17.6。
+# 精确快照见 environment.txt 的 [pip_freeze]；换机器或升级依赖后请重新生成。
+
+# 运行时依赖
+numpy>=1.21
+pandas>=1.2
+PyYAML>=6.0
+matplotlib>=3.5
+torch>=2.0
+
+# 开发与质量门禁
+pytest>=7.0
+pytest-cov>=4.0
+ruff>=0.8
+
+# 以可编辑模式安装本包（提供 itransformer-repro 命令；源码在 src/）
+-e .

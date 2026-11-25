@@ -72,7 +72,14 @@ def test_run_experiment_writes_complete_evidence(
     result = run_experiment(synthetic_project)
     run_dir = synthetic_project.run_dir()
 
-    for name in ("config.json", "metrics.json", "train.log", "pred.npy", "model.pt"):
+    for name in (
+        "config.json",
+        "metrics.json",
+        "train.log",
+        "pred.npy",
+        "true.npy",
+        "model.pt",
+    ):
         assert (run_dir / name).exists(), name
 
     assert np.isfinite(result["mse"])
@@ -80,13 +87,18 @@ def test_run_experiment_writes_complete_evidence(
     assert result["epochs_run"] == 1
     assert result["n_windows"]["train"] > 0
     assert result["device"] == "cpu"
+    assert result["inference_time_sec"] >= 0
+    assert result["total_time_sec"] >= result["inference_time_sec"]
 
     predictions = np.load(run_dir / "pred.npy")
+    targets = np.load(run_dir / "true.npy")
     assert predictions.shape == (69, PRED_LEN, N_VARS)
+    assert targets.shape == predictions.shape
 
     stored = json.loads((run_dir / "config.json").read_text(encoding="utf-8"))
     assert stored["seed"] == 7
     assert "environment" in stored
+    assert "git_dirty" in stored
 
 
 def test_run_experiment_refuses_to_overwrite(
@@ -105,3 +117,4 @@ def test_evaluate_run_recomputes_metrics(
     assert payload["recomputed"] is True
     assert payload["mse"] == pytest.approx(original["mse"], rel=1e-4)
     assert payload["mae"] == pytest.approx(original["mae"], rel=1e-4)
+    assert payload["matches_original"] is True

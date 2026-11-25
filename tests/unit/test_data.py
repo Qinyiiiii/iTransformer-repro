@@ -42,6 +42,16 @@ def test_split_borders_follows_official_ett_months() -> None:
     assert borders["test"] == (11424, 14400)
 
 
+def test_etth1_window_counts_match_paper_table4_convention() -> None:
+    spec = DATASET_SPECS["ETTh1"]
+    borders = split_borders(17420, spec, 96)
+    strict = {name: end - start - 96 - 96 + 1 for name, (start, end) in borders.items()}
+    paper = {name: end - start - 96 + 1 for name, (start, end) in borders.items()}
+    assert strict == {"train": 8449, "val": 2785, "test": 2785}
+    # 论文表 4 的 8545/2881/2881 = 严格样本数 + pred_len。
+    assert paper == {"train": 8545, "val": 2881, "test": 2881}
+
+
 def test_split_borders_uses_tail_for_ratio_datasets() -> None:
     borders = split_borders(1000, DATASET_SPECS["Weather"], 24)
     assert borders["train"] == (0, 700)
@@ -149,7 +159,9 @@ def test_dataset_card_reports_window_counts(
     path = tmp_path / "synthetic.csv"
     make_csv(path, rows=400, n_vars=3)
     monkeypatch.setitem(
-        DATASET_SPECS, "SYN", DatasetSpec("synthetic.csv", 3, "1h", "ratio")
+        DATASET_SPECS,
+        "SYN",
+        DatasetSpec("synthetic.csv", 3, "1h", "ratio", expected_rows=400),
     )
     config = DataConfig(
         name="SYN", root=str(tmp_path), file="synthetic.csv", seq_len=24, pred_len=12
@@ -157,5 +169,27 @@ def test_dataset_card_reports_window_counts(
     card = dataset_card(config)
     assert card["passed"] is True
     assert card["rows"] == 400
+    assert card["rows_match"] is True
+    assert card["size_bytes"] > 0
+    assert len(card["sha256"]) == 64
     assert card["split_windows"]["train"] == 245
     assert card["borders"]["test"] == [296, 400]
+    # 论文表 4 口径只数回看起点，比严格样本数多 pred_len 个。
+    assert card["paper_table4_windows"]["test"] == card["split_windows"]["test"] + 12
+
+
+def test_dataset_card_warns_on_row_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "synthetic.csv"
+    make_csv(path, rows=400, n_vars=3)
+    monkeypatch.setitem(
+        DATASET_SPECS,
+        "SYN",
+        DatasetSpec("synthetic.csv", 3, "1h", "ratio", expected_rows=401),
+    )
+    config = DataConfig(
+        name="SYN", root=str(tmp_path), file="synthetic.csv", seq_len=24, pred_len=12
+    )
+    assert dataset_card(config)["passed"] is True
+    assert dataset_card(config, strict=True)["passed"] is False

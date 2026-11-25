@@ -35,7 +35,7 @@ def config_from_dict(payload: dict[str, Any]) -> ExperimentConfig:
             experiment=str(payload["experiment"]),
             seed=int(payload["seed"]),
             device=str(payload.get("device", "auto")),
-            runs_dir=str(payload.get("runs_dir", "runs")),
+            runs_dir=str(payload.get("runs_dir", "results/raw")),
             data=DataConfig(**payload["data"]),
             model=ModelConfig(**payload["model"]),
             train=TrainConfig(**payload["train"]),
@@ -76,12 +76,31 @@ def evaluate_run(run_dir: Path) -> dict[str, Any]:
     state = torch.load(weights_path, map_location=device, weights_only=True)
     model.load_state_dict(state)
 
-    loader = make_loader(bundle.test, config.train.batch_size, shuffle=False)
+    loader = make_loader(
+        bundle.test,
+        config.train.batch_size,
+        shuffle=False,
+        num_workers=config.train.num_workers,
+    )
     metrics, _, _ = evaluate_model(model, loader, device)
-    payload = {
+    payload: dict[str, Any] = {
         **{key: round(value, 6) for key, value in metrics.items()},
         "recomputed": True,
         "device": str(device),
     }
+    original_path = run_dir / "metrics.json"
+    if original_path.exists():
+        original = load_json(original_path)
+        payload["original_mse"] = original.get("mse")
+        payload["original_mae"] = original.get("mae")
+        payload["mse_delta"] = round(
+            metrics["mse"] - float(original.get("mse", float("nan"))), 9
+        )
+        payload["mae_delta"] = round(
+            metrics["mae"] - float(original.get("mae", float("nan"))), 9
+        )
+        payload["matches_original"] = bool(
+            abs(payload["mse_delta"]) <= 1e-6 and abs(payload["mae_delta"]) <= 1e-6
+        )
     save_json(run_dir / "metrics_eval.json", payload)
     return payload

@@ -8,7 +8,7 @@
     会记录后继续，最后汇总成功/跳过/失败计数。
 
 前置条件：
-    已执行 ``python -m pip install -e ".[dev]"``，且 ``--config`` 模板中的数据集
+    已执行 ``python -m pip install -r requirements.txt``，且 ``--config`` 模板中的数据集
     文件已经就位（可用 ``scripts/download_data.py`` 检查）。
 
 示例命令：
@@ -23,6 +23,7 @@ import argparse
 import itertools
 import logging
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,15 @@ from itransformer_repro.data import DATASET_SPECS
 from itransformer_repro.train import run_exists, run_experiment
 
 logger = logging.getLogger(__name__)
+
+# 每个模型单独的超参文件；只取其中的 model 段与学习率/早停设置，避免批量跑
+# PatchTST/DLinear 时误用 iTransformer 的 d_model=512 等超参（基线不公平）。
+MODEL_PRESET_FILES = {
+    "itransformer": "default.yaml",
+    "dlinear": "dlinear_etth1_h96.yaml",
+    "patchtst": "patchtst_etth1_h96.yaml",
+    "transformer": "transformer_etth1_h96.yaml",
+}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -67,6 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="预测长度列表，默认 96 192 336 720。",
     )
     parser.add_argument(
+        "--seq-lens",
+        nargs="+",
+        type=int,
+        default=None,
+        help="回看长度列表；缺省沿用模板的 96。给多个值即可做回看曲线扫描。",
+    )
+    parser.add_argument(
         "--seeds",
         nargs="+",
         type=int,
@@ -92,11 +109,51 @@ def build_parser() -> argparse.ArgumentParser:
         help="作为模板的 YAML 配置路径，默认 configs/default.yaml。",
     )
     parser.add_argument(
+        "--config-dir",
+        type=Path,
+        default=Path("configs"),
+        help="模型超参 preset 所在目录，默认 configs。",
+    )
+    parser.add_argument(
+        "--no-model-presets",
+        action="store_true",
+        help="禁用 per-model preset，所有模型都沿用 --config 模板的超参。",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="只打印将执行的任务，不进行训练。",
     )
     return parser
+
+
+def _apply_model_preset(
+    config: ExperimentConfig,
+    model: str,
+    config_dir: Path,
+    batch_size_override: int | None = None,
+) -> ExperimentConfig:
+    """用 per-model preset 替换 model 段，并继承其学习率、批大小与早停设置。"""
+    preset_name = MODEL_PRESET_FILES.get(model)
+    if preset_name is None:
+        return config
+    preset_path = config_dir / preset_name
+    if not preset_path.is_file():
+        logger.warning("找不到 %s 的模型 preset %s，沿用模板超参", model, preset_path)
+        return config
+    preset = load_config(preset_path)
+    model_config = replace(preset.model, name=model)
+    train_config = replace(
+        config.train,
+        learning_rate=preset.train.learning_rate,
+        batch_size=(
+            preset.train.batch_size
+            if batch_size_override is None
+            else batch_size_override
+        ),
+        patience=preset.train.patience,
+    )
+    return replace(config, model=model_config, train=train_config)
 
 
 def build_tasks(
@@ -107,6 +164,9 @@ def build_tasks(
     seeds: Sequence[int],
     epochs: int | None,
     batch_size: int | None,
+    seq_lens: Sequence[int] | None = None,
+    config_dir: Path = Path("configs"),
+    use_model_presets: bool = True,
 ) -> list[ExperimentConfig]:
     """按矩阵组合生成经过校验的配置列表。
 
@@ -118,6 +178,10 @@ def build_tasks(
         seeds: 随机种子列表。
         epochs: 可选，覆盖 ``train.epochs``。
         batch_size: 可选，覆盖 ``train.batch_size``。
+        seq_lens: 可选，回看长度列表；缺省沿用模板。
+        config_dir: per-model preset 所在目录。
+        use_model_presets: 切换到与模板不同的模型时，是否套用该模型的 preset。
+            与模板相同的模型保留模板超参，方便 smoke 配置保持小模型。
 
     Returns:
         与去重后的组合一一对应的配置对象。
@@ -128,23 +192,36 @@ def build_tasks(
         KeyError: 覆盖项包含未知配置段。
         yaml.YAMLError: 模板不是合法 YAML。
     """
-    combos = list(dict.fromkeys(itertools.product(datasets, models, horizons, seeds)))
+    combos = list(
+        dict.fromkeys(
+            itertools.product(datasets, models, horizons, seq_lens or [None], seeds)
+        )
+    )
     tasks: list[ExperimentConfig] = []
-    for dataset, model, pred_len, seed in combos:
+    for dataset, model, pred_len, seq_len, seed in combos:
         spec = DATASET_SPECS[dataset]
+        name = f"{model}_{dataset}_h{pred_len}"
+        if seq_len is not None and seq_len != 96:
+            name = f"{name}_t{seq_len}"
         overrides: dict[str, Any] = {
-            "experiment": f"{model}_{dataset}_h{pred_len}",
+            "experiment": name,
             "seed": seed,
             "data.name": dataset,
             "data.file": spec.filename,
             "data.pred_len": pred_len,
-            "model.name": model,
         }
+        if seq_len is not None:
+            overrides["data.seq_len"] = seq_len
         if epochs is not None:
             overrides["train.epochs"] = epochs
         if batch_size is not None:
             overrides["train.batch_size"] = batch_size
-        tasks.append(load_config(template, overrides))
+
+        config = load_config(template, overrides)
+        if use_model_presets and model != config.model.name:
+            config = _apply_model_preset(config, model, config_dir, batch_size)
+        config = replace(config, model=replace(config.model, name=model))
+        tasks.append(config)
     return tasks
 
 
@@ -160,8 +237,9 @@ def describe(config: ExperimentConfig) -> str:
     return (
         f"{config.experiment} seed={config.seed} "
         f"dataset={config.data.name} file={config.data.file} "
-        f"horizon={config.data.pred_len} epochs={config.train.epochs} "
-        f"batch_size={config.train.batch_size}"
+        f"seq_len={config.data.seq_len} horizon={config.data.pred_len} "
+        f"d_model={config.model.d_model} lr={config.train.learning_rate} "
+        f"epochs={config.train.epochs} batch_size={config.train.batch_size}"
     )
 
 
@@ -230,6 +308,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if any(horizon <= 0 for horizon in args.horizons):
         parser.error("--horizons 必须为正整数")
+    if args.seq_lens is not None and any(seq_len <= 0 for seq_len in args.seq_lens):
+        parser.error("--seq-lens 必须为正整数")
     if any(seed < 0 for seed in args.seeds):
         parser.error("--seeds 必须为非负整数")
     if args.epochs is not None and args.epochs <= 0:
@@ -246,13 +326,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.seeds,
             args.epochs,
             args.batch_size,
+            args.seq_lens,
+            args.config_dir,
+            not args.no_model_presets,
         )
     except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError) as exc:
         parser.error(f"无法根据模板生成配置：{exc}")
 
     print(
         f"计划执行 {len(tasks)} 个组合，模板：{args.config}，"
-        f"runs_dir={tasks[0].runs_dir}"
+        f"runs_dir={tasks[0].runs_dir}，"
+        f"model_presets={'off' if args.no_model_presets else 'on'}"
     )
     if args.dry_run:
         print("DRY-RUN 模式：只打印任务，不训练。")

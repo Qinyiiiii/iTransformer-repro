@@ -6,7 +6,7 @@
     位置。脚本不会下载任何数据，也不会创建占位文件。
 
 前置条件：
-    已在仓库根目录执行 ``python -m pip install -e ".[dev]"``；数据按 README 的
+    已在仓库根目录执行 ``python -m pip install -r requirements.txt``；数据按 README 的
     说明手工下载并放到 ``data/raw``。
 
 示例命令：

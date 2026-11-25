@@ -1,19 +1,21 @@
-"""汇总 ``runs/`` 下的全部运行结果，输出 mean±std 表格与 CSV。
+"""汇总 ``results/raw/`` 下的全部运行结果，输出 mean±std 表格与 CSV。
 
 用途：
-    扫描 ``runs/<experiment>/seed*/metrics.json``，按
-    ``(dataset, model, seq_len, pred_len)`` 分组，计算 MSE/MAE 的均值与样本标准
-    差、种子数、平均参数量与平均训练耗时，写入 ``outputs/summary.csv`` 并在终端
-    打印 Markdown 表格。标准差在种子数小于 2 时留空，避免把单次运行误当作稳定
-    结论。
+    递归扫描 ``results/raw/**/seed*/metrics.json``，按
+    ``(experiment, dataset, model, seq_len, pred_len)`` 分组，计算 MSE/MAE 的
+    均值与样本标准差、种子数、平均参数量、平均训练耗时、推理耗时与峰值显存，
+    写入 ``results/summary/summary.csv`` 和 ``results/summary/main_table.md``，
+    并在终端打印 Markdown 表格。标准差在种子数小于 2 时留空，避免把单次运行
+    误当作稳定结论。
 
 前置条件：
-    已执行 ``python -m pip install -e ".[dev]"``，且 ``runs/`` 中至少有一次完成
-    的训练（可用 ``scripts/run_matrix.py`` 生成）。
+    已执行 ``python -m pip install -r requirements.txt``，且 ``results/raw/`` 中至少有
+    一次完成的训练（可用 ``scripts/run_matrix.py`` 生成）。
 
 示例命令：
     python scripts/aggregate.py
-    python scripts/aggregate.py --runs-dir runs --out outputs/summary.csv
+    python scripts/aggregate.py --runs-dir results/raw \
+        --out results/summary/summary.csv
 """
 
 from __future__ import annotations
@@ -56,6 +58,8 @@ SUMMARY_FIELDS = (
     "mae_std",
     "params_mean",
     "train_time_mean_sec",
+    "inference_time_mean_sec",
+    "peak_memory_mean_mb",
 )
 
 
@@ -67,19 +71,25 @@ def build_parser() -> argparse.ArgumentParser:
     """
     parser = argparse.ArgumentParser(
         prog="aggregate.py",
-        description="汇总 runs/ 下的 metrics.json，输出 mean±std 表格与 CSV。",
+        description="汇总 results/raw 下的 metrics.json，输出 mean±std 表格与 CSV。",
     )
     parser.add_argument(
         "--runs-dir",
         type=Path,
-        default=Path("runs"),
-        help="运行结果根目录，默认 runs。",
+        default=Path("results/raw"),
+        help="运行结果根目录，默认 results/raw。",
     )
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("outputs/summary.csv"),
-        help="汇总 CSV 输出路径，默认 outputs/summary.csv。",
+        default=Path("results/summary/summary.csv"),
+        help="汇总 CSV 输出路径，默认 results/summary/summary.csv。",
+    )
+    parser.add_argument(
+        "--markdown-out",
+        type=Path,
+        default=Path("results/summary/main_table.md"),
+        help="Markdown 主表输出路径，默认 results/summary/main_table.md。",
     )
     return parser
 
@@ -97,25 +107,21 @@ def iter_metrics(runs_dir: Path) -> list[dict[str, Any]]:
         FileNotFoundError: ``runs_dir`` 不存在。
     """
     if not runs_dir.is_dir():
-        raise FileNotFoundError(f"runs 目录不存在：{runs_dir}")
+        raise FileNotFoundError(f"结果目录不存在：{runs_dir}")
 
     records: list[dict[str, Any]] = []
-    for experiment_dir in sorted(runs_dir.iterdir()):
-        if not experiment_dir.is_dir():
+    for metrics_path in sorted(runs_dir.rglob("metrics.json")):
+        if not metrics_path.parent.name.startswith("seed"):
             continue
-        for seed_dir in sorted(experiment_dir.glob("seed*")):
-            metrics_path = seed_dir / "metrics.json"
-            if not metrics_path.is_file():
-                continue
-            try:
-                payload = load_json(metrics_path)
-            except (OSError, ValueError) as exc:
-                logger.warning("跳过无法解析的结果 %s：%s", metrics_path, exc)
-                continue
-            if not set(REQUIRED_METRIC_KEYS).issubset(payload):
-                logger.warning("跳过字段不完整的结果 %s", metrics_path)
-                continue
-            records.append(payload)
+        try:
+            payload = load_json(metrics_path)
+        except (OSError, ValueError) as exc:
+            logger.warning("跳过无法解析的结果 %s：%s", metrics_path, exc)
+            continue
+        if not set(REQUIRED_METRIC_KEYS).issubset(payload):
+            logger.warning("跳过字段不完整的结果 %s", metrics_path)
+            continue
+        records.append(payload)
     return records
 
 
@@ -163,6 +169,14 @@ def summarize(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
         mae_values = [float(item["mae"]) for item in items]
         params_values = [float(item["n_params"]) for item in items]
         time_values = [float(item["train_time_sec"]) for item in items]
+        inference_values = [
+            float(item["inference_time_sec"])
+            for item in items
+            if "inference_time_sec" in item
+        ]
+        memory_values = [
+            float(item["peak_memory_mb"]) for item in items if "peak_memory_mb" in item
+        ]
         rows.append(
             {
                 "experiment": experiment,
@@ -177,6 +191,12 @@ def summarize(records: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
                 "mae_std": std_or_none(mae_values),
                 "params_mean": int(round(statistics.fmean(params_values))),
                 "train_time_mean_sec": statistics.fmean(time_values),
+                "inference_time_mean_sec": (
+                    statistics.fmean(inference_values) if inference_values else None
+                ),
+                "peak_memory_mean_mb": (
+                    statistics.fmean(memory_values) if memory_values else None
+                ),
             }
         )
     return rows
@@ -219,6 +239,10 @@ def csv_row(row: dict[str, Any]) -> dict[str, str]:
         "mae_std": format_float(row["mae_std"]),
         "params_mean": str(row["params_mean"]),
         "train_time_mean_sec": format_float(row["train_time_mean_sec"], digits=2),
+        "inference_time_mean_sec": format_float(
+            row["inference_time_mean_sec"], digits=2
+        ),
+        "peak_memory_mean_mb": format_float(row["peak_memory_mean_mb"], digits=1),
     }
 
 
@@ -237,28 +261,42 @@ def write_summary(rows: Sequence[dict[str, Any]], out_path: Path) -> None:
             writer.writerow(csv_row(row))
 
 
-def print_markdown(rows: Sequence[dict[str, Any]]) -> None:
-    """在终端打印 Markdown 汇总表。
+def markdown_table(rows: Sequence[dict[str, Any]]) -> str:
+    """生成 Markdown 汇总表文本。
 
     Args:
         rows: :func:`summarize` 的返回值。
+
+    Returns:
+        可直接写入 ``main_table.md`` 的 Markdown 文本。
     """
-    print(
+    lines = [
         "| experiment | dataset | model | seq_len | pred_len | n_seeds | "
-        "mse_mean | mse_std | mae_mean | mae_std |"
-    )
-    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+        "mse_mean | mse_std | mae_mean | mae_std | params | train_s | "
+        "infer_s | peak_mb |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+        "--- | --- | --- |",
+    ]
     for row in rows:
         mse_std = format_float(row["mse_std"]) or "-"
         mae_std = format_float(row["mae_std"]) or "-"
-        print(
+        lines.append(
             f"| {row['experiment']} | {row['dataset']} | {row['model']} | "
             f"{row['seq_len']} | "
             f"{row['pred_len']} | {row['n_seeds']} | "
             f"{format_float(row['mse_mean'])} | {mse_std} | "
-            f"{format_float(row['mae_mean'])} | {mae_std} |"
+            f"{format_float(row['mae_mean'])} | {mae_std} | "
+            f"{row['params_mean']} | "
+            f"{format_float(row['train_time_mean_sec'], digits=2) or '-'} | "
+            f"{format_float(row['inference_time_mean_sec'], digits=2) or '-'} | "
+            f"{format_float(row['peak_memory_mean_mb'], digits=1) or '-'} |"
         )
-    print("说明：std 为样本标准差（n-1）；n_seeds=1 时以 '-' 表示不可计算。")
+    lines.append("")
+    lines.append(
+        "说明：std 为样本标准差（n-1）；n_seeds=1 时以 '-' 表示不可计算；"
+        "peak_mb 在 CPU 上为 0。"
+    )
+    return "\n".join(lines) + "\n"
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -290,8 +328,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
 
     write_summary(rows, args.out)
-    print_markdown(rows)
-    print(f"已写入 {args.out}（{len(rows)} 行，来自 {len(records)} 次运行）。")
+    table = markdown_table(rows)
+    print(table)
+    args.markdown_out.parent.mkdir(parents=True, exist_ok=True)
+    args.markdown_out.write_text(table, encoding="utf-8")
+    under_seeded = [row for row in rows if int(row["n_seeds"]) < 3]
+    if under_seeded:
+        print(
+            f"WARN: {len(under_seeded)} 个分组少于 3 个种子，"
+            "主结果需补足 3 个种子后再写入报告。"
+        )
+    print(
+        f"已写入 {args.out} 与 {args.markdown_out}"
+        f"（{len(rows)} 行，来自 {len(records)} 次运行）。"
+    )
     return 0
 
 

@@ -9,16 +9,16 @@
 
 `data.name` 区分大小写，必须与下表第一列完全一致。
 
-| 数据集 | 变量数 N | 采样频率 | CSV 相对路径（以 `data/raw` 为根） | 切分规则 |
-| --- | --- | --- | --- | --- |
-| ETTh1 | 7 | 1h | `ETT-small/ETTh1.csv` | ETT 固定前 12/4/4 个月 |
-| ETTh2 | 7 | 1h | `ETT-small/ETTh2.csv` | ETT 固定前 12/4/4 个月 |
-| ETTm1 | 7 | 15min | `ETT-small/ETTm1.csv` | ETT 固定前 12/4/4 个月 |
-| ETTm2 | 7 | 15min | `ETT-small/ETTm2.csv` | ETT 固定前 12/4/4 个月 |
-| Weather | 21 | 10min | `weather/weather.csv` | 70/10/20 时间顺序 |
-| ECL | 321 | 1h | `electricity/electricity.csv` | 70/10/20 时间顺序 |
-| Traffic | 862 | 1h | `traffic/traffic.csv` | 70/10/20 时间顺序 |
-| Exchange | 8 | 1d | `exchange_rate/exchange_rate.csv` | 70/10/20 时间顺序 |
+| 数据集 | 变量数 N | 官方行数 | 采样频率 | CSV 相对路径（以 `data/raw` 为根） | 切分规则 |
+| --- | --- | --- | --- | --- | --- |
+| ETTh1 | 7 | 17420 | 1h | `ETT-small/ETTh1.csv` | ETT 固定前 12/4/4 个月 |
+| ETTh2 | 7 | 17420 | 1h | `ETT-small/ETTh2.csv` | ETT 固定前 12/4/4 个月 |
+| ETTm1 | 7 | 69680 | 15min | `ETT-small/ETTm1.csv` | ETT 固定前 12/4/4 个月 |
+| ETTm2 | 7 | 69680 | 15min | `ETT-small/ETTm2.csv` | ETT 固定前 12/4/4 个月 |
+| Weather | 21 | 52696 | 10min | `weather/weather.csv` | 70/10/20 时间顺序 |
+| ECL | 321 | 26304 | 1h | `electricity/electricity.csv` | 70/10/20 时间顺序 |
+| Traffic | 862 | 17544 | 1h | `traffic/traffic.csv` | 70/10/20 时间顺序 |
+| Exchange | 8 | 7588 | 1d | `exchange_rate/exchange_rate.csv` | 70/10/20 时间顺序 |
 
 说明：
 
@@ -105,12 +105,14 @@ ETTh1 官方文件共 17420 行，但只有前 14400 行进入切分；文件不
 因此本仓库的窗口数与论文表 4 中 ETTh1 的 `8545/2881/2881` **不是同一计数口径**：
 
 - 按本仓库公式（`T = 96`、`S = 96`），ETTh1 三段窗口数为 `8449/2785/2785`；
-- 论文表 4 的数字偏大，源于原文的计数方式（未扣除预测长度）与可能的行数口径差异，
-  属于原文不一致；
-- 本项目**不修改切分协议去凑论文数字**，实际窗口数以 `check-data` 的输出为准，并在
-  `docs/experiments.md` 的差异表中如实记录。
+- 论文表 4 的 `8545/2881/2881` 等于"只数回看起点、不扣 `pred_len`"的计数，即
+  本仓库口径 + `S`；`check-data` 的 `paper_table4_windows` 字段会同时给出这组数；
+- 两种口径在 `data.py` 模块注释、本文与 `docs/experiments.md` 差异表中均有说明；
+  本项目**不修改切分协议去凑论文数字**，实际参与训练的窗口数以 `split_windows`
+  为准。
 
-数值请以 `check-data` 打印的 `split_windows` 为准，不要手工抄写上面手算的示例值。
+数值请以 `check-data` 打印的 `split_windows` 与 `paper_table4_windows` 为准，
+不要手工抄写上面手算的示例值。
 
 ## 6. 下载来源
 
@@ -123,6 +125,15 @@ ETTh1 官方文件共 17420 行，但只有前 14400 行进入切分；文件不
 
 本文不给出任何其他下载地址；若官方仓库链接发生变化，以官方仓库 README 为准。
 下载后请按第 1 节表格中的相对路径命名并放置（大小写敏感）。
+
+本次审计的实际下载记录（可作为版本参照）：
+
+| 数据集 | 下载日期 | 文件大小（bytes） | SHA256 |
+| --- | --- | --- | --- |
+| ETTh1 | 2026-11-24 | 2589657 | `f18de3ad269cef59bb07b5438d79bb3042d3be49bdeecf01c1cd6d29695ee066` |
+
+ETT 官方仓库无版本标签，上表以固定文件哈希作为数据版本；重新下载后请用
+`check-data` 复核 `size_bytes`、`sha256` 与 `rows`，不一致时先查明来源再训练。
 
 ## 7. 校验命令
 
@@ -138,22 +149,29 @@ itransformer-repro check-data --config configs/default.yaml
 | --- | --- |
 | `dataset` | 配置中的 `data.name` |
 | `path` | 解析后的 CSV 绝对/相对路径 |
-| `rows` | 文件总行数（含时间列） |
+| `size_bytes` / `sha256` | 文件大小与 SHA256，用于记录数据版本 |
+| `rows` / `expected_rows` / `rows_match` | 实际数据行数（不含表头与时间列）/ 官方行数 / 是否一致 |
 | `n_vars` / `expected_n_vars` | 实际变量数 / 注册表期望变量数 |
+| `vars_match` / `passed` | 变量数是否一致 / 总体是否通过 |
 | `freq` / `split_rule` | 采样频率标签 / 切分规则 |
 | `seq_len` / `pred_len` | 本次配置的 `T` 与 `S` |
-| `passed` | 变量数是否与注册规格一致 |
-| `split_windows` | `train/val/test` 三段窗口数（变量数不符时为 `null`） |
+| `split_windows` | 严格样本数口径的 `train/val/test` 窗口数 |
+| `paper_table4_windows` | 只数回看起点（不扣 `S`）的窗口数，用于对齐论文表 4 |
 | `borders` | 三段边界 `[start, end]`（变量数不符时为 `null`） |
 
-变量数不符时命令会打印 `FAIL` 并返回非零退出码。`check-data` 只接受
-`--config`，不支持 `--set` 覆盖；`configs/` 现有配置全部指向 ETTh1，校验其它数据集
-请复制一份 YAML 并修改 `data.name`、`data.file` 后再执行。
+变量数不符时命令会打印 `FAIL` 并返回非零退出码；行数与官方版本不同时默认只打印
+`WARN`，加 `--strict` 可让其返回失败。`check-data` 支持 `--set` 覆盖（例如
+`--set data.seq_len=192 data.pred_len=336 --out data_card.json`）；`configs/` 现有
+配置默认指向 ETTh1，校验其它数据集可用 `--set data.name=Weather` 等覆盖，或复制
+YAML 修改 `data.name`、`data.file`。
 
 ## 8. 版本控制
 
-`data/raw/`、`data/processed/`、`runs/`、`*.npy`、`*.pt` 均已在 `.gitignore` 中排除。
-仓库只提交本说明文档与配置，**不要提交原始数据或运行产物**。
+`data/raw/`、`data/processed/`、`*.npy`、`*.pt` 均已在 `.gitignore` 中排除。
+公开 GitHub 仓库**不提交任何原始数据**，只保留本说明文档与校验信息；
+`results/raw/` 下的 `config.json`、`metrics.json`、`train.log` 等属于本地运行产物，
+默认也不入库（见 `results/README.md`）。如需向课程提交原始结果，请单独打包，
+**不要提交原始数据或模型权重**。
 
 ## 9. 许可证与引用
 

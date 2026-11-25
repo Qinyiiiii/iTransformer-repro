@@ -1,8 +1,8 @@
-# 消融 C：去掉变量维注意力（论文表 3 的 w/o Attn）
+﻿# 消融 C：去掉变量维注意力（论文表 3 的 w/o Attn）
 experiment: ablation_no_attention_ETTh1_h96
 seed: 2021
 device: auto
-runs_dir: runs
+runs_dir: results/raw
 
 data:
   name: ETTh1
@@ -26,8 +26,9 @@ model:
   use_pos_embed: false
 
 train:
-  batch_size: 16
+  batch_size: 32
   learning_rate: 0.001
   epochs: 10
   patience: 0
   num_workers: 0
+

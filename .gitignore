@@ -10,6 +10,8 @@ dist/
 .pytest_cache/
 .ruff_cache/
 .coverage
+.coverage.*
+.screenshots/
 htmlcov/
 .idea/
 .vscode/
@@ -29,6 +31,15 @@ artifacts/
 *.pth
 *.ckpt
 *.npy
+*.log
+
+# Experiment outputs (public repo keeps only directory structure)
+results/raw/*
+!results/raw/.gitkeep
+results/summary/*
+!results/summary/.gitkeep
+results/figures/*
+!results/figures/.gitkeep
 
 # Notebook checkpoints and OS files
 .ipynb_checkpoints/

@@ -3,7 +3,7 @@
 experiment: patchtst_ETTh1_h96
 seed: 2021
 device: auto
-runs_dir: runs
+runs_dir: results/raw
 
 data:
   name: ETTh1
